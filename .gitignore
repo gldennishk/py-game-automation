@@ -1,0 +1,26 @@
+# Python / Build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.build/
+.dist/
+
+# Virtual env / IDE
+.venv/
+.env/
+.vscode/
+.idea/
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# App
+game_automation/debug_shots/
+
+# OS
+.DS_Store
+Thumbs.db
+
