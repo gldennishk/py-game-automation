@@ -1,6 +1,6 @@
 import numpy as np
 import cv2
-from core.template_matcher import TemplateMatcher
+from game_automation.core.template_matcher import TemplateMatcher
 
 
 def test_match_in_roi(monkeypatch):
@@ -16,7 +16,7 @@ def test_match_in_roi(monkeypatch):
     monkeypatch.setattr(TemplateMatcher, "_load_templates", fake_load_templates, raising=True)
     tm._load_templates()
 
-    from core.targets import TARGET_DEFINITIONS
+    from game_automation.core.targets import TARGET_DEFINITIONS
     TARGET_DEFINITIONS.clear()
     TARGET_DEFINITIONS.update({
         "X": {"template": "", "threshold": 0.9, "roi": [0.4, 0.4, 0.9, 0.9]}

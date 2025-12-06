@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "scripts": [
+    {
+      "id": "1",
+      "name": "1",
+      "nodes": [],
+      "connections": {}
+    }
+  ]
+}

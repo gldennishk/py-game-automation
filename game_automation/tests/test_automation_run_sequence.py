@@ -1,5 +1,7 @@
-from core.actions import Action, ActionSequence
-from core.automation import AutomationController
+from game_automation.core.actions import Action, ActionSequence
+from game_automation.core.automation import AutomationController
+from game_automation.core.actions import VisualScript, VisualNode
+from PySide6.QtCore import QPointF
 
 
 class FakePyAutoGUI:
@@ -38,4 +40,18 @@ def test_run_sequence_monkeypatch(monkeypatch):
 
     assert fake.clicks == ["left"]
     assert fake.moves and fake.moves[0][0] == 20
+
+
+def test_execute_visual_script_click_label(monkeypatch):
+    fake = FakePyAutoGUI()
+    monkeypatch.setattr("pyautogui.moveTo", fake.moveTo)
+    monkeypatch.setattr("pyautogui.click", fake.click)
+
+    n1 = VisualNode(id="n1", type="click", params={"mode": "label", "label": "A", "button": "left"}, position=QPointF(0, 0))
+    vs = VisualScript(id="s1", name="demo", nodes=[n1], connections={})
+    ac = AutomationController(scale_factor=1.0)
+    vision = {"found_targets": [{"label": "A", "bbox": [10, 20, 30, 40]}]}
+    ac.execute_visual_script(vs, vision)
+    assert fake.moves and fake.moves[0][0] == 20
+    assert fake.clicks == ["left"]
 

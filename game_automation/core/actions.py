@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field, asdict
-from typing import List, Literal, Dict, Any
+from typing import List, Literal, Dict, Any, Optional
+from PySide6.QtCore import QPointF
 import json
 
 
-ActionType = Literal["click", "key", "sleep"]
+ActionType = Literal["click", "key", "sleep", "find_color", "condition", "loop", "find_image"]
 
 
 @dataclass
@@ -67,4 +68,71 @@ class ActionSequence:
         lines.append("```")
         lines.append("")
         return "\n".join(lines)
+
+
+# ----- Visual Script model -----
+
+@dataclass
+class VisualNode:
+    id: str
+    type: ActionType
+    params: Dict[str, Any] = field(default_factory=dict)
+    position: QPointF = field(default_factory=lambda: QPointF(0.0, 0.0))
+    outputs: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "params": self.params,
+            "position": [self.position.x(), self.position.y()],
+            "outputs": list(self.outputs),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VisualNode":
+        pos = data.get("position", [0.0, 0.0])
+        qpos = QPointF(float(pos[0]), float(pos[1]))
+        return cls(
+            id=str(data.get("id", "")),
+            type=data.get("type", "click"),  # type: ignore
+            params=data.get("params", {}),
+            position=qpos,
+            outputs=list(data.get("outputs", [])),
+        )
+
+
+@dataclass
+class VisualScript:
+    id: str = ""
+    name: str = "Unnamed Visual Script"
+    nodes: List[VisualNode] = field(default_factory=list)
+    connections: Dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "nodes": [n.to_dict() for n in self.nodes],
+            "connections": dict(self.connections),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "VisualScript":
+        nodes_data = data.get("nodes", [])
+        nodes: List[VisualNode] = [VisualNode.from_dict(nd) for nd in nodes_data]
+        return cls(
+            id=str(data.get("id", "")),
+            name=data.get("name", "Unnamed Visual Script"),
+            nodes=nodes,
+            connections=dict(data.get("connections", {})),
+        )
+
+    def to_json(self, indent: int = 2) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+    @classmethod
+    def from_json(cls, text: str) -> "VisualScript":
+        data = json.loads(text)
+        return cls.from_dict(data)
 

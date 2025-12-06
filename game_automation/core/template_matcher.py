@@ -1,7 +1,7 @@
 from typing import Dict, List, Tuple, Any
 import cv2
 import numpy as np
-from .targets import TARGET_DEFINITIONS
+from . import targets
 
 
 Detection = Dict[str, Any]
@@ -11,10 +11,13 @@ class TemplateMatcher:
     def __init__(self):
         self.templates: Dict[str, np.ndarray] = {}
         self.template_sizes: Dict[str, Tuple[int, int]] = {}
+        self._targets_version_loaded: int = -1
         self._load_templates()
 
     def _load_templates(self):
-        for label, cfg in TARGET_DEFINITIONS.items():
+        self.templates.clear()
+        self.template_sizes.clear()
+        for label, cfg in targets.TARGET_DEFINITIONS.items():
             path = cfg["template"]
             img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             if img is None:
@@ -22,12 +25,18 @@ class TemplateMatcher:
             self.templates[label] = img
             h, w = img.shape[:2]
             self.template_sizes[label] = (w, h)
+        self._targets_version_loaded = getattr(targets, "TARGETS_VERSION", 0)
 
     def match(self, gray_frame: np.ndarray) -> List[Detection]:
         detections: List[Detection] = []
         H, W = gray_frame.shape[:2]
+        try:
+            if self._targets_version_loaded != getattr(targets, "TARGETS_VERSION", 0):
+                self._load_templates()
+        except Exception:
+            pass
 
-        for label, cfg in TARGET_DEFINITIONS.items():
+        for label, cfg in targets.TARGET_DEFINITIONS.items():
             if label not in self.templates:
                 continue
 

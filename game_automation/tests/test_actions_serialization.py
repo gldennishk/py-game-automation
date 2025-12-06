@@ -1,4 +1,4 @@
-from core.actions import Action, ActionSequence
+from game_automation.core.actions import Action, ActionSequence
 
 
 def test_actions_json_roundtrip():

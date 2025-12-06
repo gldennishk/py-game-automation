@@ -1,4 +1,4 @@
-from core.scaling import logical_to_physical
+from game_automation.core.scaling import logical_to_physical
 
 
 def test_logical_to_physical():

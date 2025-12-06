@@ -1,14 +1,32 @@
-from typing import List
+from typing import List, Dict
 import json
+import os
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QComboBox, QLineEdit,
-    QToolButton, QFileDialog, QMessageBox, QPushButton, QLabel, QTableWidgetItem
+    QToolButton, QFileDialog, QMessageBox, QPushButton, QLabel, QTableWidgetItem,
+    QListWidget, QListWidgetItem, QSplitter, QInputDialog
 )
 
-from core.actions import Action, ActionSequence, ActionType
+from ..core.actions import Action, ActionSequence, ActionType
+from typing import get_args
+from ..core.targets import TARGET_DEFINITIONS
+
+# Base directory for JSON files (project root)
+# All JSON persistence files (visual_scripts.json, resources.json) are stored at the project root.
+# Legacy files like scripts.json and game_automation/*.json are deprecated and no longer used.
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
 
+# ============================================================================
+# LEGACY: ActionSequenceEditor
+# ============================================================================
+# This widget is considered legacy and is not currently integrated into the
+# main MainWindow UI. The primary GUI uses VisualScriptEditor and ResourceSidebar
+# for visual script editing. ActionSequenceEditor and AutomationController.run_sequence
+# provide a lower-level JSON-based sequence API that may be used for testing or
+# programmatic script creation, but is not exposed in the main user interface.
+# ============================================================================
 class ActionSequenceEditor(QWidget):
     sequenceChanged = Signal(ActionSequence)
     logMessage = Signal(str)
@@ -76,11 +94,20 @@ class ActionSequenceEditor(QWidget):
         self.table.insertRow(row)
 
         combo = QComboBox()
-        combo.addItems(["click", "key", "sleep"])
+        try:
+            combo.addItems(list(get_args(ActionType)))
+        except Exception:
+            combo.addItems(["click", "key", "sleep", "find_color"])
         idx = combo.findText(action.type)
         if idx >= 0:
             combo.setCurrentIndex(idx)
         self.table.setCellWidget(row, 0, combo)
+
+        # Create a container widget for Params (JSON input + Label dropdown)
+        param_widget = QWidget()
+        param_layout = QHBoxLayout(param_widget)
+        param_layout.setContentsMargins(0, 0, 0, 0)
+        param_layout.setSpacing(4)
 
         edit = QLineEdit()
         try:
@@ -88,7 +115,30 @@ class ActionSequenceEditor(QWidget):
         except Exception:
             text = "{}"
         edit.setText(text)
-        self.table.setCellWidget(row, 1, edit)
+        
+        label_combo = QComboBox()
+        label_combo.setPlaceholderText("Select Label...")
+        # Add an empty item to represent no selection
+        label_combo.addItem("")
+        # Sort keys for better usability
+        label_combo.addItems(sorted(TARGET_DEFINITIONS.keys()))
+        label_combo.setFixedWidth(120)
+        label_combo.setToolTip("Select a label to auto-fill JSON params")
+
+        def on_label_selected(text):
+            if text:
+                # Auto-fill JSON for label-based click
+                new_params = {"mode": "label", "label": text, "button": "left"}
+                edit.setText(json.dumps(new_params, ensure_ascii=False))
+                # Reset combo to avoid confusion if user manually edits later? 
+                # Or keep it? Keeping it is fine.
+
+        label_combo.currentTextChanged.connect(on_label_selected)
+
+        param_layout.addWidget(edit)
+        param_layout.addWidget(label_combo)
+        
+        self.table.setCellWidget(row, 1, param_widget)
 
         ops_widget = QWidget()
         ops_layout = QHBoxLayout(ops_widget)
@@ -116,7 +166,11 @@ class ActionSequenceEditor(QWidget):
         rows = self.table.rowCount()
         for row in range(rows):
             combo: QComboBox = self.table.cellWidget(row, 0)
-            edit: QLineEdit = self.table.cellWidget(row, 1)
+            
+            # Retrieve QLineEdit from the composite widget in column 1
+            param_widget: QWidget = self.table.cellWidget(row, 1)
+            edit: QLineEdit = param_widget.findChild(QLineEdit)
+            
             action_type: ActionType = combo.currentText()  # type: ignore
             params_text = edit.text().strip()
             if not params_text:
@@ -221,3 +275,215 @@ class ActionSequenceEditor(QWidget):
         seq = self.get_sequence()
         self.sequenceChanged.emit(seq)
 
+
+class ResourceSidebar(QWidget):
+    currentScriptChanged = Signal(str)
+    scriptsChanged = Signal(list)
+    templatesChanged = Signal(dict)
+    scriptRenamed = Signal(str, str)  # old_name, new_name
+    scriptDuplicated = Signal(str, str)  # base_name, new_name
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scripts: List[str] = []
+        self._templates: Dict[str, str] = {}
+        self._build_ui()
+        self._load_persisted()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        # Scripts controls
+        scripts_row = QHBoxLayout()
+        btn_new_script = QPushButton("新增腳本", self)
+        btn_rename_script = QPushButton("重命名", self)
+        btn_dup_script = QPushButton("複製", self)
+        btn_del_script = QPushButton("刪除", self)
+        scripts_row.addWidget(btn_new_script)
+        scripts_row.addWidget(btn_rename_script)
+        scripts_row.addWidget(btn_dup_script)
+        scripts_row.addWidget(btn_del_script)
+        layout.addLayout(scripts_row)
+
+        # Lists
+        split = QSplitter(Qt.Vertical, self)
+        self.list_scripts = QListWidget(self)
+        self.list_templates = QListWidget(self)
+        split.addWidget(self.list_scripts)
+        split.addWidget(self.list_templates)
+        layout.addWidget(split)
+
+        # Template controls
+        tmpl_row = QHBoxLayout()
+        btn_new_tmpl = QPushButton("新增範本", self)
+        btn_rename_tmpl = QPushButton("重命名", self)
+        btn_dup_tmpl = QPushButton("複製", self)
+        btn_del_tmpl = QPushButton("刪除", self)
+        tmpl_row.addWidget(btn_new_tmpl)
+        tmpl_row.addWidget(btn_rename_tmpl)
+        tmpl_row.addWidget(btn_dup_tmpl)
+        tmpl_row.addWidget(btn_del_tmpl)
+        layout.addLayout(tmpl_row)
+
+        # Connections
+        self.list_scripts.itemSelectionChanged.connect(self._on_script_selected)
+
+        btn_new_script.clicked.connect(self._on_new_script)
+        btn_rename_script.clicked.connect(self._on_rename_script)
+        btn_dup_script.clicked.connect(self._on_dup_script)
+        btn_del_script.clicked.connect(self._on_del_script)
+
+        btn_new_tmpl.clicked.connect(self._on_new_template)
+        btn_rename_tmpl.clicked.connect(self._on_rename_template)
+        btn_dup_tmpl.clicked.connect(self._on_dup_template)
+        btn_del_tmpl.clicked.connect(self._on_del_template)
+
+    def _on_script_selected(self):
+        items = self.list_scripts.selectedItems()
+        if items:
+            self.currentScriptChanged.emit(items[0].text())
+
+    def set_scripts(self, names: List[str]):
+        self._scripts = names
+        self.list_scripts.clear()
+        for n in names:
+            self.list_scripts.addItem(QListWidgetItem(n))
+        self.scriptsChanged.emit(list(self._scripts))
+
+    def set_templates(self, mapping: Dict[str, str]):
+        self._templates = mapping
+        self.list_templates.clear()
+        for k in sorted(mapping.keys()):
+            item = QListWidgetItem(k)
+            # TODO: Add template thumbnail preview
+            # TODO: Load image from mapping[k] and create thumbnail icon
+            # TODO: Set item.setIcon() with scaled QIcon from template image
+            self.list_templates.addItem(item)
+        self.templatesChanged.emit(dict(self._templates))
+
+    def _load_persisted(self):
+        try:
+            file_path = os.path.join(BASE_DIR, "resources.json")
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.set_templates(data.get("templates", {}))
+        except Exception:
+            pass
+
+    def persist(self):
+        try:
+            file_path = os.path.join(BASE_DIR, "resources.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump({"templates": self._templates}, f, ensure_ascii=False, indent=2)
+            try:
+                from ..core import targets as _targets
+                _targets.reload_targets_from_resources(override=False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _on_new_script(self):
+        name, ok = QInputDialog.getText(self, "新增腳本", "名稱：")
+        if not ok or not name.strip():
+            return
+        if name in self._scripts:
+            QMessageBox.warning(self, "提示", "名稱已存在")
+            return
+        self._scripts.append(name)
+        self.set_scripts(self._scripts)
+
+    def _on_rename_script(self):
+        items = self.list_scripts.selectedItems()
+        if not items:
+            return
+        old = items[0].text()
+        new, ok = QInputDialog.getText(self, "重命名腳本", f"將 {old} 重命名為：", text=old)
+        if not ok or not new.strip():
+            return
+        if new != old and new in self._scripts:
+            QMessageBox.warning(self, "提示", "名稱已存在")
+            return
+        idx = self._scripts.index(old)
+        self._scripts[idx] = new
+        self.set_scripts(self._scripts)
+        self.scriptRenamed.emit(old, new)
+
+    def _on_dup_script(self):
+        items = self.list_scripts.selectedItems()
+        if not items:
+            return
+        base = items[0].text()
+        i = 1
+        while True:
+            cand = f"{base}_copy{i}"
+            if cand not in self._scripts:
+                break
+            i += 1
+        self._scripts.append(cand)
+        self.set_scripts(self._scripts)
+        self.scriptDuplicated.emit(base, cand)
+
+    def _on_del_script(self):
+        items = self.list_scripts.selectedItems()
+        if not items:
+            return
+        name = items[0].text()
+        self._scripts = [s for s in self._scripts if s != name]
+        self.set_scripts(self._scripts)
+
+    def _on_new_template(self):
+        name, ok = QInputDialog.getText(self, "新增範本", "名稱：")
+        if not ok or not name.strip():
+            return
+        if name in self._templates:
+            QMessageBox.warning(self, "提示", "名稱已存在")
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "選擇模板檔", "", "Image Files (*.png *.jpg *.jpeg);;All Files (*)")
+        if not path:
+            return
+        self._templates[name] = path
+        self.set_templates(self._templates)
+        self.persist()  # Explicitly persist to ensure templates are available to TemplateMatcher
+
+    def _on_rename_template(self):
+        items = self.list_templates.selectedItems()
+        if not items:
+            return
+        old = items[0].text()
+        new, ok = QInputDialog.getText(self, "重命名範本", f"將 {old} 重命名為：", text=old)
+        if not ok or not new.strip():
+            return
+        if new != old and new in self._templates:
+            QMessageBox.warning(self, "提示", "名稱已存在")
+            return
+        val = self._templates.pop(old)
+        self._templates[new] = val
+        self.set_templates(self._templates)
+        self.persist()  # Explicitly persist to ensure templates are available to TemplateMatcher
+
+    def _on_dup_template(self):
+        items = self.list_templates.selectedItems()
+        if not items:
+            return
+        base = items[0].text()
+        i = 1
+        while True:
+            cand = f"{base}_copy{i}"
+            if cand not in self._templates:
+                break
+            i += 1
+        self._templates[cand] = self._templates[base]
+        self.set_templates(self._templates)
+        self.persist()  # Explicitly persist to ensure templates are available to TemplateMatcher
+
+    def _on_del_template(self):
+        items = self.list_templates.selectedItems()
+        if not items:
+            return
+        name = items[0].text()
+        if name in self._templates:
+            self._templates.pop(name)
+            self.set_templates(self._templates)
+            self.persist()  # Explicitly persist to ensure templates are available to TemplateMatcher
