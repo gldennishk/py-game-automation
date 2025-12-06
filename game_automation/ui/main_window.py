@@ -39,6 +39,9 @@ class MainWindow(QMainWindow):
         self.automation = AutomationController(scale_factor=self.scale_factor)
         self.perf = PerformanceMonitor(window_seconds=1.0)
         self.last_vision_result = None
+        self._processing = False
+        self._last_process_ts = 0.0
+        self._process_min_interval = 1.0 / 15.0
 
         self._build_ui()
 
@@ -103,7 +106,7 @@ class MainWindow(QMainWindow):
         region = {"top": 0, "left": 0, "width": 1920, "height": 1080}
         self.capture_worker = ScreenCaptureWorker(
             region=region,
-            fps=60,
+            fps=30,
             callback=lambda f, t: self.frame_bus.frame_arrived.emit(f, t),
         )
         self.capture_worker.start()
@@ -121,13 +124,21 @@ class MainWindow(QMainWindow):
 
     def on_frame(self, frame, ts):
         self.perf.tick(ts)
-        result = self.processor.process_frame(frame)
-        self.last_vision_result = result
-        self.lbl_latency.setText(f"Latency: {result['latency_ms']:.1f} ms")
+        # 預覽始終更新，但匹配處理以節流方式執行，避免卡死
+        if (not self._processing) and (ts - self._last_process_ts >= self._process_min_interval):
+            self._processing = True
+            try:
+                result = self.processor.process_frame(frame)
+                self.last_vision_result = result
+                self._last_process_ts = ts
+                self.lbl_latency.setText(f"Latency: {result['latency_ms']:.1f} ms")
+            finally:
+                self._processing = False
+
         fps_val = self.perf.fps()
         self.lbl_fps.setText(f"FPS: {fps_val:.0f}")
 
-        rgb = cv2.cvtColor(result["frame"], cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR), cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)

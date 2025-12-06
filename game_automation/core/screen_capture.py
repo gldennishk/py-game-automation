@@ -12,21 +12,22 @@ class ScreenCaptureWorker(threading.Thread):
         self.callback = callback
         self._running = threading.Event()
         self._running.set()
-        self._mss = mss.mss()
+        self._mss = None
 
     def run(self):
         frame_interval = 1.0 / self.fps
-        while self._running.is_set():
-            start = time.perf_counter()
-            img = self._mss.grab(self.region)
-            frame = np.array(img)
-            ts = time.time()
-            if self.callback:
-                self.callback(frame, ts)
-            elapsed = time.perf_counter() - start
-            sleep_time = frame_interval - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+        with mss.mss() as sct:
+            while self._running.is_set():
+                start = time.perf_counter()
+                img = sct.grab(self.region)
+                frame = np.array(img)
+                ts = time.time()
+                if self.callback:
+                    self.callback(frame, ts)
+                elapsed = time.perf_counter() - start
+                sleep_time = frame_interval - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
     def stop(self):
         self._running.clear()
