@@ -102,15 +102,22 @@
 **參數：**
 - `mode`: `"label"` 或 `"color"`
 - `label`: 模板標籤名稱（當 `mode="label"` 時）
+- `min_confidence`: 置信度閾值（當 `mode="label"` 時，預設：`0.0`，與 `find_image.confidence` 的差異見下方說明）
 - `hsv_min`, `hsv_max`, `bgr_min`, `bgr_max`: 顏色範圍（當 `mode="color"` 時）
 - `next_true`: 條件為真時的下一個節點 ID
 - `next_false`: 條件為假時的下一個節點 ID
 
 **執行邏輯：**
 - 根據 `mode` 檢查條件
+- 當 `mode="label"` 時，從 `vision_result["found_targets"]` 中尋找對應 `label` 的偵測結果，並檢查 `det["confidence"] >= min_confidence` 才視為條件成立
 - 返回 `next_true` 或 `next_false` 作為下一個節點
 
 **注意：** 條件節點的連線不會出現在 `connections` 字典中，而是儲存在節點的 `next_true` 和 `next_false` 參數中。
+
+**`min_confidence` 與 `find_image.confidence` 的差異：**
+- `find_image.confidence`：用於 `find_image` 節點，決定是否找到圖片（影響節點返回的布林值）
+- `condition.min_confidence`：用於 `condition` 節點的 label 模式，決定條件是否成立（影響 `next_true` 或 `next_false` 的選擇）
+- 兩者可以設定不同的值，例如：`find_image` 使用較低的置信度（0.7）來偵測圖片，而 `condition` 使用較高的置信度（0.9）來確保條件成立
 
 ### 6. loop（迴圈）
 
@@ -141,6 +148,185 @@
 - 檢查置信度是否 >= `confidence`
 - 返回是否找到（布林值）
 
+**重要說明：**
+- `find_image` 節點**不會進行點擊**，只負責偵測圖片並回傳是否找到（布林值）
+- 此節點只影響流程控制或供後續 `condition` / `loop` 節點使用
+- 若需要點擊，請在 `find_image` 後接上一個 `click` 節點
+
+**使用範例：**
+
+**範例 1：找到圖片才點擊**
+```json
+{
+  "nodes": [
+    {
+      "id": "node_1",
+      "type": "condition",
+      "params": {
+        "mode": "label",
+        "label": "START_BUTTON",
+        "next_true": "node_2",
+        "next_false": "node_3"
+      }
+    },
+    {
+      "id": "node_2",
+      "type": "click",
+      "params": {
+        "mode": "label",
+        "label": "START_BUTTON",
+        "button": "left"
+      }
+    },
+    {
+      "id": "node_3",
+      "type": "sleep",
+      "params": {
+        "seconds": 1.0
+      }
+    }
+  ],
+  "connections": {
+    "node_1": "node_2"
+  }
+}
+```
+此腳本會先使用 `condition` 節點檢測是否找到 "START_BUTTON"，如果找到（`next_true`），則執行 `click` 節點點擊；如果沒找到（`next_false`），則執行 `sleep` 節點等待。
+
+**範例 2：看到 A 但同時看到 B 就不點**
+```json
+{
+  "nodes": [
+    {
+      "id": "node_1",
+      "type": "condition",
+      "params": {
+        "mode": "label",
+        "label": "BUTTON_A",
+        "next_true": "node_2",
+        "next_false": "node_4"
+      }
+    },
+    {
+      "id": "node_2",
+      "type": "condition",
+      "params": {
+        "mode": "label",
+        "label": "BUTTON_B",
+        "next_true": "node_4",
+        "next_false": "node_3"
+      }
+    },
+    {
+      "id": "node_3",
+      "type": "click",
+      "params": {
+        "mode": "label",
+        "label": "BUTTON_A",
+        "button": "left"
+      }
+    },
+    {
+      "id": "node_4",
+      "type": "sleep",
+      "params": {
+        "seconds": 0.5
+      }
+    }
+  ],
+  "connections": {
+    "node_1": "node_2",
+    "node_2": "node_3"
+  }
+}
+```
+此腳本會先檢查是否看到 "BUTTON_A"，如果看到，再檢查是否同時看到 "BUTTON_B"。只有在看到 A 但沒看到 B 時才會點擊 A。
+
+### 8. verify_image_color（驗證圖片顏色）
+
+先找到圖片，再驗證圖片指定位置的顏色是否符合條件。這是一個二重驗證流程，用於確保找到的圖片確實是預期的目標。
+
+**參數：**
+- `template_name`: 模板標籤名稱（對應 `TARGET_DEFINITIONS` 中的標籤）
+- `offset_x`: 相對於圖片中心的 X 像素偏移（預設：`0`）
+- `offset_y`: 相對於圖片中心的 Y 像素偏移（預設：`0`）
+- `hsv_min`, `hsv_max`: HSV 顏色範圍（可選）
+- `bgr_min`, `bgr_max`: BGR 顏色範圍（可選）
+- `radius`: 檢查半徑（像素，預設：`0.0`）
+
+**執行邏輯：**
+1. 在 `vision_result["found_targets"]` 中找到對應 `template_name` 的偵測結果
+2. 取得其邊界框（bbox），計算中心點
+3. 根據 `offset_x` 和 `offset_y` 計算實際檢查座標
+4. 以檢查座標為中心，向四周擴展 `radius` 像素作為檢查區域（ROI 半徑）
+5. 使用 `ImageProcessor.find_color` 檢查該區域的顏色是否落在指定範圍內
+6. 返回是否驗證通過（布林值）
+
+**顏色範圍優先順序：**
+- 當同時提供 HSV 與 BGR 範圍時，系統會**優先使用 HSV 範圍**做判斷
+- BGR 範圍僅在 HSV 未提供時使用
+
+**使用範例：**
+
+**範例：先找圖片再驗證顏色再點擊**
+```json
+{
+  "nodes": [
+    {
+      "id": "node_1",
+      "type": "find_image",
+      "params": {
+        "template_name": "BUTTON",
+        "confidence": 0.8
+      }
+    },
+    {
+      "id": "node_2",
+      "type": "verify_image_color",
+      "params": {
+        "template_name": "BUTTON",
+        "offset_x": 10,
+        "offset_y": 5,
+        "bgr_min": [200, 200, 200],
+        "bgr_max": [255, 255, 255],
+        "radius": 2.0
+      }
+    },
+    {
+      "id": "node_3",
+      "type": "condition",
+      "params": {
+        "mode": "label",
+        "label": "BUTTON",
+        "next_true": "node_4",
+        "next_false": "node_5"
+      }
+    },
+    {
+      "id": "node_4",
+      "type": "click",
+      "params": {
+        "mode": "label",
+        "label": "BUTTON",
+        "button": "left"
+      }
+    },
+    {
+      "id": "node_5",
+      "type": "sleep",
+      "params": {
+        "seconds": 1.0
+      }
+    }
+  ],
+  "connections": {
+    "node_1": "node_2",
+    "node_2": "node_3"
+  }
+}
+```
+此腳本會先使用 `find_image` 找到 "BUTTON"，然後使用 `verify_image_color` 驗證按鈕中心偏移 (10, 5) 位置的顏色是否為白色範圍，最後使用 `condition` 判斷是否通過驗證，通過則點擊。
+
 ## vision_result 結構
 
 所有節點執行時都會接收 `vision_result` 字典，包含：
@@ -161,6 +347,14 @@
   - `{"templates": {"範本名稱": "圖片檔路徑", ...}}`
 - 這是「metadata」清單，描述名稱與檔案路徑。
 
+### 模板路徑格式
+- `resources.json` 中的模板路徑預期為**相對於專案根目錄的路徑**（例如：`"temp_templates/inline_image_123.png"`）。
+- 若模板位於專案外部，可使用絕對路徑（例如：`"/path/to/external/image.png"`）。
+- GUI 會在載入時自動將相對路徑轉換為絕對路徑（使用 `game_automation.core.path_utils.to_absolute_path()` 統一路徑轉換工具），並在儲存時轉回相對路徑。
+- 內部處理統一使用絕對路徑，以確保 `TemplateMatcher` 能正確讀取圖片（`cv2.imread` 需要絕對路徑）。
+- **GUI 層級的路徑處理**：`ResourceSidebar._templates` 字典和 `templatesChanged` 信號發送的值都是絕對路徑。所有消費 `templatesChanged` 信號的代碼都應假設接收到的路徑是絕對路徑，無需再與專案根目錄進行路徑拼接。
+- 外部工具或測試腳本如需讀取 `resources.json`，應使用 `game_automation.core.path_utils.to_absolute_path()` 或 `to_relative_path()` 作為標準路徑轉換工具。取得專案根目錄請使用 `game_automation.core.path_utils.get_base_dir()`。
+
 ## 偵測目標定義（TARGET_DEFINITIONS）
 - 模組 `game_automation/core/targets.py` 內的 `TARGET_DEFINITIONS` 是偵測系統的統一來源。
 - 啟動時會嘗試從 `resources.json` 讀取模板並合併到 `TARGET_DEFINITIONS`，對應的預設參數：
@@ -168,6 +362,23 @@
   - `threshold`: `0.85`
   - `roi`: `[0.0, 0.0, 1.0, 1.0]`
 - 若 `core.targets` 已存在同名定義，預設不覆寫；可使用覆寫模式（程式內部）控制行為。
+
+### TARGET_DEFINITIONS 合約與持久化要求
+**重要合約：** 所有非內建目標（`_BUILTIN_TARGETS`）都必須透過 `resources.json` 定義。
+
+- **內建目標**：定義在 `game_automation/core/targets.py` 中的 `TARGET_DEFINITIONS` 初始值（例如：`DAILY_BOOK_BUTTON`、`QINGYUN_CARD` 等）會被標記為內建目標，永遠不會被修剪。
+- **非內建目標**：所有其他目標都必須在 `resources.json` 中定義，否則會被自動移除。
+- **自動修剪機制**：當 `ResourceSidebar.persist()` 被呼叫時，會以 `prune_missing=True` 重新載入目標定義。這會移除所有不在 `resources.json` 中且不是內建目標的項目，確保 `TARGET_DEFINITIONS` 與持久化的 `resources.json` 保持同步。
+- **動態添加目標**：如果您需要在程式碼中動態添加目標，必須同時更新 `resources.json`（透過 `ResourceSidebar.persist()` 或直接修改檔案），否則這些目標會在下次 `persist()` 時被修剪。
+- **建議做法**：所有模板管理操作都應透過 GUI 的 `ResourceSidebar` 進行，它會自動處理持久化和同步。
+
+**開發者警告：** 如果您在程式碼中直接修改 `TARGET_DEFINITIONS` 字典（例如：`TARGET_DEFINITIONS["new_target"] = {...}`），這些修改**不會自動持久化**。當 GUI 執行任何模板操作（新增、重命名、刪除等）時，`ResourceSidebar.persist()` 會被呼叫，所有未在 `resources.json` 中定義的非內建目標都會被自動移除。因此，任何程式化的目標添加都必須同時更新 `resources.json`，否則這些目標將在下次 GUI 操作時丟失。
+
+**外部動態擴充注意事項：** 如果您有外部腳本或工具需要動態添加目標，有兩種做法：
+1. **推薦做法**：透過 GUI 的 `ResourceSidebar` API 進行操作，它會自動處理持久化。
+2. **進階做法**：直接修改 `TARGET_DEFINITIONS` 的同時，也必須更新 `resources.json` 檔案（使用與 `ResourceSidebar.persist()` 相同的結構），否則這些目標會在下次 `reload_targets_from_resources(prune_missing=True)` 時被移除。如果您需要完全動態、非持久化的目標（例如：臨時測試目標），請避免在 GUI 中進行任何模板操作，或使用配置標誌來禁用修剪功能（需要修改程式碼）。
+
+**重要：非持久化的程式化目標添加不受支援**：任何未透過 `resources.json` 持久化的程式化目標添加都是不受支援的，並會在下次 GUI 模板操作時被自動移除。如果您需要在程式碼中動態添加目標，必須同時更新 `resources.json`（透過 `ResourceSidebar.persist()` 或直接修改檔案）。當 `reload_targets_from_resources(prune_missing=True)` 被呼叫時，所有未持久化的非內建目標都會被記錄到控制台並被移除。
 
 ## 動態重載與即時生效
 - 當 GUI 透過 `ResourceSidebar` 新增、重命名、複製或刪除模板時，會自動呼叫 `persist()` 進行存檔。
@@ -238,12 +449,21 @@
 
 ### 連線節點
 
-1. 點擊工具列上的「🔗 連接模式」按鈕啟用連接模式
-2. 點擊來源節點右側的連接點（小圓圈）
-3. 點擊目標節點的連接點
-4. 對於條件/迴圈節點，第一個連線會設定 `next_true`/`next_body`，第二個連線會設定 `next_false`/`next_after`
+使用拖拽方式連接節點：
 
-**注意：** 條件和迴圈節點的連線會立即在畫面上顯示為邊線，與標準連線一致。
+1. **從來源節點拖拽**：將滑鼠移動到來源節點右側的輸出區域（會顯示連接把手）
+2. **按住滑鼠左鍵並拖拽**：從來源節點拖拽到目標節點
+3. **釋放滑鼠**：在目標節點上釋放滑鼠按鈕以完成連接
+4. **視覺反饋**：
+   - 拖拽時會顯示虛線臨時連接線
+   - 當滑鼠懸停在可連接的節點上時，節點邊框會高亮顯示
+   - 無法連接時（如已有連接），會顯示紅色邊框提示
+
+**特殊節點連線：**
+- 對於條件節點（`condition`）：第一個連線會設定 `next_true`，第二個連線會設定 `next_false`
+- 對於迴圈節點（`loop`）：第一個連線會設定 `next_body`，第二個連線會設定 `next_after`
+
+**注意：** 條件和迴圈節點的連線會立即在畫面上顯示為邊線，與標準連線一致。連接模式切換按鈕已被移除，所有連接操作都使用拖拽方式完成。
 
 ### 縮放與平移
 
@@ -282,10 +502,31 @@
 1. **啟動截圖**：點擊「開始截圖」按鈕
 2. **建立腳本**：在左側新增腳本，或在編輯器中新增節點
 3. **設定參數**：選中節點，在屬性面板中設定參數（例如：點擊節點的 `label` 參數）
-4. **連線節點**：使用連接模式將節點依序連接
+4. **連線節點**：從來源節點右側拖拽到目標節點（詳見上方「連線節點」說明）
 5. **執行腳本**：點擊「執行腳本」按鈕
 
 腳本會從第一個節點開始執行，根據連線和條件分支依序執行各節點。
+
+## 故障排除
+
+### 前置條件檢查
+
+開始執行腳本前，請確保：
+
+1. **已啟動截圖**：
+   - 已在主視窗上按「開始截圖」，或等待系統自動啟動截圖並顯示 FPS
+   - 若忘記啟動，系統會嘗試自動啟動，但第一次可能要等 1–2 秒才有畫面
+
+2. **模板圖片檔案存在**：
+   - 所有模板圖片檔案（包含 `resources.json` 的 inline_image 檔案）都存在且可讀取
+   - 若 `find_image` 或點擊完全沒反應，請開啟 `resources.json` 確認路徑與檔案是否存在
+   - 確認模板路徑正確（相對路徑或絕對路徑）
+
+### 常見問題
+
+- **find_image 節點永遠失敗**：檢查模板是否已正確註冊到 `resources.json`，確認圖片檔案路徑正確
+- **點擊節點無法點擊**：確認 `click` 節點的 `label` 參數已設定，且對應的模板已在畫面中被偵測到
+- **腳本執行無反應**：確認已啟動截圖，且狀態列顯示 FPS 數值
 
 ## 範例腳本
 

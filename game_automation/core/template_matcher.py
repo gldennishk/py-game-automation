@@ -2,6 +2,7 @@ from typing import Dict, List, Tuple, Any
 import cv2
 import numpy as np
 from . import targets
+from .path_utils import to_absolute_path
 
 
 Detection = Dict[str, Any]
@@ -17,9 +18,14 @@ class TemplateMatcher:
     def _load_templates(self):
         self.templates.clear()
         self.template_sizes.clear()
-        for label, cfg in targets.TARGET_DEFINITIONS.items():
+        # Create a snapshot to avoid "dictionary changed size during iteration" error
+        # when TARGET_DEFINITIONS is modified in another thread
+        target_items = list(targets.TARGET_DEFINITIONS.items())
+        for label, cfg in target_items:
             path = cfg["template"]
-            img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+            # Ensure path is absolute (cv2.imread needs absolute paths)
+            abs_path = to_absolute_path(path)
+            img = cv2.imread(abs_path, cv2.IMREAD_GRAYSCALE)
             if img is None:
                 continue
             self.templates[label] = img
@@ -36,7 +42,11 @@ class TemplateMatcher:
         except Exception:
             pass
 
-        for label, cfg in targets.TARGET_DEFINITIONS.items():
+        # Create a snapshot to avoid "dictionary changed size during iteration" error
+        # when TARGET_DEFINITIONS is modified in another thread (e.g., when
+        # templates are added/removed via reload_targets_from_resources)
+        target_items = list(targets.TARGET_DEFINITIONS.items())
+        for label, cfg in target_items:
             if label not in self.templates:
                 continue
 

@@ -2,10 +2,39 @@
   "version": "1.0",
   "scripts": [
     {
-      "id": "1",
-      "name": "1",
-      "nodes": [],
-      "connections": {}
+      "id": "123",
+      "name": "123",
+      "nodes": [
+        {
+          "id": "node_1",
+          "type": "find_image",
+          "params": {
+            "template_name": "123"
+          },
+          "position": [
+            -1095.5366075752086,
+            -765.3552035902163
+          ],
+          "outputs": []
+        },
+        {
+          "id": "node_2",
+          "type": "click",
+          "params": {
+            "label": "inline_image_1765088729572",
+            "button": "left",
+            "mode": "label"
+          },
+          "position": [
+            -982.6706902311257,
+            -612.4235600142573
+          ],
+          "outputs": []
+        }
+      ],
+      "connections": {
+        "node_1": "node_2"
+      }
     }
   ]
 }

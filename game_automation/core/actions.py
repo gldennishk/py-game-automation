@@ -79,15 +79,20 @@ class VisualNode:
     params: Dict[str, Any] = field(default_factory=dict)
     position: QPointF = field(default_factory=lambda: QPointF(0.0, 0.0))
     outputs: List[str] = field(default_factory=list)
+    comment: Optional[str] = None  # Optional comment text for the node
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "type": self.type,
             "params": self.params,
             "position": [self.position.x(), self.position.y()],
             "outputs": list(self.outputs),
         }
+        # Only include comment if it's not None
+        if self.comment is not None:
+            result["comment"] = self.comment
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "VisualNode":
@@ -99,6 +104,7 @@ class VisualNode:
             params=data.get("params", {}),
             position=qpos,
             outputs=list(data.get("outputs", [])),
+            comment=data.get("comment"),  # Backward compatible: defaults to None if missing
         )
 
 
@@ -108,14 +114,19 @@ class VisualScript:
     name: str = "Unnamed Visual Script"
     nodes: List[VisualNode] = field(default_factory=list)
     connections: Dict[str, str] = field(default_factory=dict)
+    groups: Dict[str, List[str]] = field(default_factory=dict)  # Group name -> list of node IDs
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "name": self.name,
             "nodes": [n.to_dict() for n in self.nodes],
             "connections": dict(self.connections),
         }
+        # Only include groups if it's not empty
+        if self.groups:
+            result["groups"] = dict(self.groups)
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "VisualScript":
@@ -126,6 +137,7 @@ class VisualScript:
             name=data.get("name", "Unnamed Visual Script"),
             nodes=nodes,
             connections=dict(data.get("connections", {})),
+            groups=dict(data.get("groups", {})),  # Backward compatible: defaults to empty dict if missing
         )
 
     def to_json(self, indent: int = 2) -> str:

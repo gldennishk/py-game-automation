@@ -5,10 +5,30 @@ from .actions import VisualScript, VisualNode
 class AutomationController:
     def __init__(self, scale_factor: float = 1.0):
         self.on_node_executed: Optional[Callable[[str, bool], None]] = None
+        self.on_node_about_to_execute: Optional[Callable[[str], None]] = None
         self.scale_factor = float(scale_factor)
         self._loop_counters: dict[str, int] = {}
+        self.execution_mode: str = "continuous"  # "continuous", "step", "paused"
+        self.breakpoints: set[str] = set()
+        self._execution_paused: bool = False
+        self._waiting_for_step: bool = False
+    
+    def resume_execution(self):
+        """Resume execution from pause or step mode"""
+        self._execution_paused = False
+    
+    def pause_execution(self):
+        """Pause execution"""
+        self._execution_paused = True
+    
+    def toggle_breakpoint(self, node_id: str):
+        """Toggle breakpoint on a node"""
+        if node_id in self.breakpoints:
+            self.breakpoints.remove(node_id)
+        else:
+            self.breakpoints.add(node_id)
 
-    def execute_visual_script(self, script: VisualScript, vision_result: Union[dict, Callable[[], dict]], current_node_id: Optional[str] = None):
+    def execute_visual_script(self, script: VisualScript, vision_result: Union[dict, Callable[[], dict]], current_node_id: Optional[str] = None, should_cancel_callback: Optional[Callable[[], bool]] = None):
         # Reset loop counters at the start of each execution
         self._loop_counters.clear()
         
@@ -36,33 +56,75 @@ class AutomationController:
         steps = 0
         visited = set()
         prev_loop_driven = False
-        while nid and steps < 1000:
-            node = self._find_node(script, nid)
-            if node is None:
-                # Node ID exists in connections but node not found in script
-                # Log error and break to prevent infinite loop
+        prev_node_id = None
+        try:
+            while nid and steps < 1000:
+                # Check for cancellation before executing each node
+                if should_cancel_callback and should_cancel_callback():
+                    break
+                
+                node = self._find_node(script, nid)
+                if node is None:
+                    # Node ID exists in connections but node not found in script
+                    # Log error and break to prevent infinite loop
+                    if self.on_node_executed:
+                        self.on_node_executed(nid, False)
+                    break
+                
+                allow_repeat = bool(node and (node.type == "loop" or prev_loop_driven))
+                if nid in visited and not allow_repeat:
+                    break
+                visited.add(nid)
+                steps += 1
+                
+                # Check for breakpoints and step mode
+                if nid in self.breakpoints:
+                    self._execution_paused = True
+                    # Wait for resume with frequent cancellation checks
+                    while self._execution_paused and not (should_cancel_callback and should_cancel_callback()):
+                        import time
+                        time.sleep(0.05)  # Reduced sleep interval for faster cancellation response
+                        # Check cancellation more frequently
+                        if should_cancel_callback and should_cancel_callback():
+                            break
+                
+                if self.execution_mode == "step":
+                    self._execution_paused = True
+                    self._waiting_for_step = True
+                    # Wait for step signal with frequent cancellation checks
+                    while self._execution_paused and not (should_cancel_callback and should_cancel_callback()):
+                        import time
+                        time.sleep(0.05)  # Reduced sleep interval for faster cancellation response
+                        # Check cancellation more frequently
+                        if should_cancel_callback and should_cancel_callback():
+                            break
+                    self._waiting_for_step = False
+                
+                # Signal that we're about to execute this node (for running state)
+                # This should be done via a callback if available
+                if hasattr(self, 'on_node_about_to_execute') and self.on_node_about_to_execute:
+                    self.on_node_about_to_execute(nid)
+                
+                ok = False
+                next_override = None
+                if node:
+                    # Get fresh vision result for each node execution
+                    current_vision = get_vision_result()
+                    ok, next_override = self._exec_node(node, current_vision)
                 if self.on_node_executed:
-                    self.on_node_executed(nid, False)
-                break
-            
-            allow_repeat = bool(node and (node.type == "loop" or prev_loop_driven))
-            if nid in visited and not allow_repeat:
-                break
-            visited.add(nid)
-            steps += 1
-            ok = False
-            next_override = None
-            if node:
-                # Get fresh vision result for each node execution
-                current_vision = get_vision_result()
-                ok, next_override = self._exec_node(node, current_vision)
-            if self.on_node_executed:
-                self.on_node_executed(nid, ok)
-            if node and node.type == "loop":
-                prev_loop_driven = (next_override == node.params.get("next_body"))
-            else:
-                prev_loop_driven = False
-            nid = next_override or script.connections.get(nid)
+                    self.on_node_executed(nid, ok)
+                
+                prev_node_id = nid
+                if node and node.type == "loop":
+                    prev_loop_driven = (next_override == node.params.get("next_body"))
+                else:
+                    prev_loop_driven = False
+                nid = next_override or script.connections.get(nid)
+        finally:
+            # Reset execution state to clean default regardless of how execution ended
+            self.execution_mode = "continuous"
+            self._execution_paused = False
+            self._waiting_for_step = False
 
     def _find_node(self, script: VisualScript, nid: str) -> Optional[VisualNode]:
         for n in script.nodes:
@@ -123,8 +185,13 @@ class AutomationController:
                 m = node.params.get("mode", "label")
                 if m == "label":
                     label = str(node.params.get("label", ""))
+                    min_confidence = float(node.params.get("min_confidence", 0.0))
                     det = next((d for d in vision_result.get("found_targets", []) if d.get("label") == label), None)
-                    result = det is not None
+                    if det:
+                        det_confidence = det.get("confidence", 0.0)
+                        result = det_confidence >= min_confidence
+                    else:
+                        result = False
                 elif m == "color":
                     from .image_processor import ImageProcessor
                     frame_bgr = vision_result.get("frame")
@@ -169,6 +236,64 @@ class AutomationController:
                             return True, None
                 
                 return False, None
+            except Exception:
+                return False, None
+        if t == "verify_image_color":
+            try:
+                template_name = str(node.params.get("template_name", ""))
+                offset_x = int(node.params.get("offset_x", 0))
+                offset_y = int(node.params.get("offset_y", 0))
+                hsv_min = node.params.get("hsv_min")
+                hsv_max = node.params.get("hsv_max")
+                bgr_min = node.params.get("bgr_min")
+                bgr_max = node.params.get("bgr_max")
+                radius = float(node.params.get("radius", 0.0))
+                
+                if not template_name:
+                    return False, None
+                
+                # Find the template in found_targets
+                found_targets = vision_result.get("found_targets", [])
+                det = next((d for d in found_targets if d.get("label") == template_name), None)
+                if not det:
+                    return False, None
+                
+                # Get bbox and calculate actual coordinates
+                x1, y1, x2, y2 = det["bbox"]
+                # Calculate center or use offset from top-left
+                center_x = int((x1 + x2) / 2)
+                center_y = int((y1 + y2) / 2)
+                check_x = center_x + offset_x
+                check_y = center_y + offset_y
+                
+                # Get frame
+                frame_bgr = vision_result.get("frame")
+                if frame_bgr is None:
+                    return False, None
+                
+                # Check bounds
+                h, w = frame_bgr.shape[:2]
+                if check_x < 0 or check_x >= w or check_y < 0 or check_y >= h:
+                    return False, None
+                
+                # Extract a small ROI around the check point
+                # Use radius as the ROI radius (half the side length of the square ROI)
+                # ROI will be a square from (check_x - radius, check_y - radius) to (check_x + radius, check_y + radius)
+                roi_size = max(1, int(radius) if radius > 0 else 5)
+                roi_x1 = max(0, check_x - roi_size)
+                roi_y1 = max(0, check_y - roi_size)
+                roi_x2 = min(w, check_x + roi_size)
+                roi_y2 = min(h, check_y + roi_size)
+                roi = frame_bgr[roi_y1:roi_y2, roi_x1:roi_x2]
+                
+                if roi.size == 0:
+                    return False, None
+                
+                # Use ImageProcessor to find color in ROI
+                from .image_processor import ImageProcessor
+                ip = ImageProcessor()
+                boxes = ip.find_color(roi, hsv_min=hsv_min, hsv_max=hsv_max, bgr_min=bgr_min, bgr_max=bgr_max)
+                return bool(boxes), None
             except Exception:
                 return False, None
         return False, None

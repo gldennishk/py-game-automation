@@ -1,21 +1,23 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 import json
 import os
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QComboBox, QLineEdit,
     QToolButton, QFileDialog, QMessageBox, QPushButton, QLabel, QTableWidgetItem,
-    QListWidget, QListWidgetItem, QSplitter, QInputDialog
+    QListWidget, QListWidgetItem, QSplitter, QInputDialog, QTabWidget
 )
 
 from ..core.actions import Action, ActionSequence, ActionType
 from typing import get_args
 from ..core.targets import TARGET_DEFINITIONS
+from ..core.path_utils import to_absolute_path, to_relative_path, get_base_dir
 
 # Base directory for JSON files (project root)
 # All JSON persistence files (visual_scripts.json, resources.json) are stored at the project root.
 # Legacy files like scripts.json and game_automation/*.json are deprecated and no longer used.
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+# Use get_base_dir() to get the project root directory for consistency.
+BASE_DIR = get_base_dir()  # For backward compatibility, but prefer using get_base_dir() directly
 
 
 # ============================================================================
@@ -279,16 +281,20 @@ class ActionSequenceEditor(QWidget):
 class ResourceSidebar(QWidget):
     currentScriptChanged = Signal(str)
     scriptsChanged = Signal(list)
-    templatesChanged = Signal(dict)
+    templatesChanged = Signal(dict)  # Emits dict[str, str] where values are absolute paths
     scriptRenamed = Signal(str, str)  # old_name, new_name
     scriptDuplicated = Signal(str, str)  # base_name, new_name
+    saveNodeTemplateRequested = Signal()  # Emitted when user requests to save selected nodes as template
+    nodeTemplateActivated = Signal(str)  # Emitted when user double-clicks a node template (template_name)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scripts: List[str] = []
         self._templates: Dict[str, str] = {}
+        self._node_templates: Dict[str, dict] = {}  # Template name -> {nodes: [...], connections: {...}}
         self._build_ui()
         self._load_persisted()
+        self._load_node_templates()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -306,13 +312,34 @@ class ResourceSidebar(QWidget):
         scripts_row.addWidget(btn_del_script)
         layout.addLayout(scripts_row)
 
-        # Lists
-        split = QSplitter(Qt.Vertical, self)
-        self.list_scripts = QListWidget(self)
-        self.list_templates = QListWidget(self)
-        split.addWidget(self.list_scripts)
-        split.addWidget(self.list_templates)
-        layout.addWidget(split)
+        # Create tab widget for scripts, templates, and node templates
+        self.tab_widget = QTabWidget(self)
+        
+        # Scripts tab
+        scripts_widget = QWidget()
+        scripts_layout = QVBoxLayout(scripts_widget)
+        scripts_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_scripts = QListWidget(scripts_widget)
+        scripts_layout.addWidget(self.list_scripts)
+        self.tab_widget.addTab(scripts_widget, "腳本")
+        
+        # Image templates tab
+        templates_widget = QWidget()
+        templates_layout = QVBoxLayout(templates_widget)
+        templates_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_templates = QListWidget(templates_widget)
+        templates_layout.addWidget(self.list_templates)
+        self.tab_widget.addTab(templates_widget, "圖片範本")
+        
+        # Node templates tab
+        node_templates_widget = QWidget()
+        node_templates_layout = QVBoxLayout(node_templates_widget)
+        node_templates_layout.setContentsMargins(0, 0, 0, 0)
+        self.list_node_templates = QListWidget(node_templates_widget)
+        node_templates_layout.addWidget(self.list_node_templates)
+        self.tab_widget.addTab(node_templates_widget, "節點模板")
+        
+        layout.addWidget(self.tab_widget)
 
         # Template controls
         tmpl_row = QHBoxLayout()
@@ -325,6 +352,15 @@ class ResourceSidebar(QWidget):
         tmpl_row.addWidget(btn_dup_tmpl)
         tmpl_row.addWidget(btn_del_tmpl)
         layout.addLayout(tmpl_row)
+        
+        # Node template controls
+        node_tmpl_row = QHBoxLayout()
+        btn_new_node_tmpl = QPushButton("保存模板", self)
+        btn_del_node_tmpl = QPushButton("刪除", self)
+        node_tmpl_row.addWidget(btn_new_node_tmpl)
+        node_tmpl_row.addWidget(btn_del_node_tmpl)
+        node_tmpl_row.addStretch()
+        layout.addLayout(node_tmpl_row)
 
         # Connections
         self.list_scripts.itemSelectionChanged.connect(self._on_script_selected)
@@ -338,6 +374,10 @@ class ResourceSidebar(QWidget):
         btn_rename_tmpl.clicked.connect(self._on_rename_template)
         btn_dup_tmpl.clicked.connect(self._on_dup_template)
         btn_del_tmpl.clicked.connect(self._on_del_template)
+        
+        btn_new_node_tmpl.clicked.connect(self._on_save_node_template)
+        btn_del_node_tmpl.clicked.connect(self._on_del_node_template)
+        self.list_node_templates.itemDoubleClicked.connect(self._on_node_template_selected)
 
     def _on_script_selected(self):
         items = self.list_scripts.selectedItems()
@@ -352,19 +392,61 @@ class ResourceSidebar(QWidget):
         self.scriptsChanged.emit(list(self._scripts))
 
     def set_templates(self, mapping: Dict[str, str]):
-        self._templates = mapping
+        """
+        Set template mappings and update UI.
+        
+        Args:
+            mapping: Dictionary mapping template names to file paths.
+                    Paths can be relative or absolute; they will be converted to absolute
+                    for internal storage.
+        
+        Note:
+            - Internal _templates dictionary always stores absolute paths
+            - templatesChanged signal emits absolute paths in its dict values
+            - Conversion to relative paths happens only in persist() when saving to resources.json
+            - All consumers of templatesChanged should treat the emitted paths as absolute
+        """
+        # Convert all paths to absolute for internal use
+        # Note: mapping can contain relative or absolute paths, but _templates
+        # internally always stores absolute paths. Callers should assume _templates
+        # contains absolute paths. Conversion to relative happens only in persist().
+        self._templates = {}
+        for k, v in mapping.items():
+            self._templates[k] = to_absolute_path(v)
         self.list_templates.clear()
-        for k in sorted(mapping.keys()):
+        for k in sorted(self._templates.keys()):
             item = QListWidgetItem(k)
             # TODO: Add template thumbnail preview
             # TODO: Load image from mapping[k] and create thumbnail icon
             # TODO: Set item.setIcon() with scaled QIcon from template image
             self.list_templates.addItem(item)
+        # Emit templatesChanged with absolute paths - all consumers should treat these as absolute
         self.templatesChanged.emit(dict(self._templates))
+
+    def register_template(self, name: str, path: str) -> None:
+        """
+        Public API to register a template.
+        
+        Adds or updates a template in the internal _templates dictionary,
+        updates the UI, and emits templatesChanged signal.
+        
+        Args:
+            name: Template name (must be unique)
+            path: Template file path (can be relative or absolute, will be converted to absolute)
+        
+        This method should be used instead of directly accessing _templates
+        to ensure proper internal state management and UI updates.
+        """
+        # Convert path to absolute for internal storage
+        abs_path = to_absolute_path(path)
+        self._templates[name] = abs_path
+        # Update UI by calling set_templates with current state
+        # This ensures the list is properly refreshed
+        self.set_templates(self._templates)
 
     def _load_persisted(self):
         try:
-            file_path = os.path.join(BASE_DIR, "resources.json")
+            file_path = os.path.join(get_base_dir(), "resources.json")
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 self.set_templates(data.get("templates", {}))
@@ -373,12 +455,16 @@ class ResourceSidebar(QWidget):
 
     def persist(self):
         try:
-            file_path = os.path.join(BASE_DIR, "resources.json")
+            file_path = os.path.join(get_base_dir(), "resources.json")
+            # Convert absolute paths to relative before saving
+            templates_to_save = {}
+            for k, v in self._templates.items():
+                templates_to_save[k] = to_relative_path(v)
             with open(file_path, "w", encoding="utf-8") as f:
-                json.dump({"templates": self._templates}, f, ensure_ascii=False, indent=2)
+                json.dump({"templates": templates_to_save}, f, ensure_ascii=False, indent=2)
             try:
                 from ..core import targets as _targets
-                _targets.reload_targets_from_resources(override=False)
+                _targets.reload_targets_from_resources(override=False, prune_missing=True)
             except Exception:
                 pass
         except Exception:
@@ -443,8 +529,7 @@ class ResourceSidebar(QWidget):
         path, _ = QFileDialog.getOpenFileName(self, "選擇模板檔", "", "Image Files (*.png *.jpg *.jpeg);;All Files (*)")
         if not path:
             return
-        self._templates[name] = path
-        self.set_templates(self._templates)
+        self.register_template(name, path)
         self.persist()  # Explicitly persist to ensure templates are available to TemplateMatcher
 
     def _on_rename_template(self):
@@ -468,14 +553,15 @@ class ResourceSidebar(QWidget):
         if not items:
             return
         base = items[0].text()
+        if base not in self._templates:
+            return
         i = 1
         while True:
             cand = f"{base}_copy{i}"
             if cand not in self._templates:
                 break
             i += 1
-        self._templates[cand] = self._templates[base]
-        self.set_templates(self._templates)
+        self.register_template(cand, self._templates[base])
         self.persist()  # Explicitly persist to ensure templates are available to TemplateMatcher
 
     def _on_del_template(self):
@@ -487,3 +573,65 @@ class ResourceSidebar(QWidget):
             self._templates.pop(name)
             self.set_templates(self._templates)
             self.persist()  # Explicitly persist to ensure templates are available to TemplateMatcher
+    
+    def _on_save_node_template(self):
+        """Save selected nodes as a node template (called from MainWindow with editor reference)"""
+        # Emit signal to request template name and delegate node selection to MainWindow
+        self.saveNodeTemplateRequested.emit()
+    
+    def _on_del_node_template(self):
+        """Delete selected node template"""
+        items = self.list_node_templates.selectedItems()
+        if not items:
+            return
+        name = items[0].text()
+        if name in self._node_templates:
+            self._node_templates.pop(name)
+            self._refresh_node_templates_list()
+            self._persist_node_templates()
+    
+    def _on_node_template_selected(self, item: QListWidgetItem):
+        """Handle node template double-click to instantiate"""
+        template_name = item.text()
+        if template_name in self._node_templates:
+            # Emit signal to MainWindow to instantiate template
+            self.nodeTemplateActivated.emit(template_name)
+    
+    def _refresh_node_templates_list(self):
+        """Refresh the node templates list widget"""
+        self.list_node_templates.clear()
+        for name in sorted(self._node_templates.keys()):
+            self.list_node_templates.addItem(QListWidgetItem(name))
+    
+    def _persist_node_templates(self):
+        """Save node templates to disk"""
+        try:
+            file_path = os.path.join(get_base_dir(), "node_templates.json")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(self._node_templates, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    
+    def _load_node_templates(self):
+        """Load node templates from disk"""
+        try:
+            file_path = os.path.join(get_base_dir(), "node_templates.json")
+            if os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    self._node_templates = json.load(f)
+                self._refresh_node_templates_list()
+        except Exception:
+            self._node_templates = {}
+    
+    def save_node_template(self, name: str, nodes: list, connections: dict):
+        """Public API to save a node template"""
+        self._node_templates[name] = {
+            "nodes": nodes,
+            "connections": connections
+        }
+        self._refresh_node_templates_list()
+        self._persist_node_templates()
+    
+    def get_node_template(self, name: str) -> Optional[dict]:
+        """Get a node template by name"""
+        return self._node_templates.get(name)
