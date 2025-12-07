@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 import os
 from PySide6.QtCore import Qt, Signal, QObject, QThread, QTimer, QPointF, QMutex
 from PySide6.QtGui import QImage, QPixmap, QFont
@@ -666,11 +666,57 @@ class MainWindow(QMainWindow):
         # Create preview panel as dock widget
         preview_dock = QDockWidget("畫面預覽", self)
         preview_dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
-        preview_label = QLabel()
-        preview_label.setMinimumSize(320, 240)
-        preview_label.setAlignment(Qt.AlignCenter)
-        preview_label.setText("等待畫面...")
-        preview_label.setStyleSheet("background-color: #2d2d2d; color: #888888; border: 1px solid #444444;")
+        
+        # Custom clickable preview widget
+        class ClickablePreviewLabel(QLabel):
+            def __init__(self, parent_window):
+                super().__init__()
+                self._parent_window = parent_window
+                self._detection_boxes = []  # List of {bbox: (x1,y1,x2,y2), label: str, screen_coords: (x1,y1,x2,y2)}
+                self.setMinimumSize(320, 240)
+                self.setAlignment(Qt.AlignCenter)
+                self.setText("等待畫面...")
+                self.setStyleSheet("background-color: #2d2d2d; color: #888888; border: 1px solid #444444;")
+                self.setMouseTracking(True)
+            
+            def set_detection_boxes(self, boxes: list):
+                """Set detection boxes with screen coordinates"""
+                self._detection_boxes = boxes
+            
+            def mousePressEvent(self, event):
+                """Handle mouse click to select detection box"""
+                if event.button() == Qt.LeftButton:
+                    click_pos = event.position().toPoint()
+                    # Find the detection box that contains or is nearest to the click
+                    best_box = None
+                    min_dist = float('inf')
+                    
+                    for box_info in self._detection_boxes:
+                        screen_coords = box_info.get("screen_coords")
+                        if not screen_coords:
+                            continue
+                        x1, y1, x2, y2 = screen_coords
+                        # Check if click is inside the box
+                        if x1 <= click_pos.x() <= x2 and y1 <= click_pos.y() <= y2:
+                            best_box = box_info
+                            break
+                        # Otherwise calculate distance to box center
+                        center_x = (x1 + x2) / 2
+                        center_y = (y1 + y2) / 2
+                        dist = ((click_pos.x() - center_x) ** 2 + (click_pos.y() - center_y) ** 2) ** 0.5
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_box = box_info
+                    
+                    # If found a box and there's a selected node that supports label
+                    if best_box and self._parent_window:
+                        label = best_box.get("label", "")
+                        if label:
+                            self._parent_window._apply_label_to_selected_node(label)
+                
+                super().mousePressEvent(event)
+        
+        preview_label = ClickablePreviewLabel(self)
         preview_freeze_btn = QPushButton("凍結畫面")
         preview_freeze_btn.setCheckable(True)
         preview_freeze_btn.setToolTip("凍結當前畫面以便仔細檢視")
@@ -686,6 +732,54 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, preview_dock)
         self._preview_label = preview_label
         self._preview_freeze_btn = preview_freeze_btn
+        self._preview_detection_boxes = []  # Store detection boxes for click detection
+        
+        # Create variable monitor dock widget
+        var_monitor_dock = QDockWidget("變數監視器", self)
+        var_monitor_dock.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        var_monitor_widget = QWidget()
+        var_monitor_layout = QVBoxLayout(var_monitor_widget)
+        var_monitor_layout.setContentsMargins(4, 4, 4, 4)
+        var_monitor_layout.setSpacing(4)
+        
+        # Vision result summary
+        vision_label = QLabel("畫面偵測結果:")
+        vision_label.setFont(QFont("Consolas", 9))
+        vision_label.setStyleSheet("font-weight: bold;")
+        var_monitor_layout.addWidget(vision_label)
+        self._vision_summary_text = QTextEdit()
+        self._vision_summary_text.setReadOnly(True)
+        self._vision_summary_text.setFont(QFont("Consolas", 8))
+        self._vision_summary_text.setMaximumHeight(120)
+        self._vision_summary_text.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        var_monitor_layout.addWidget(self._vision_summary_text)
+        
+        # Loop counters
+        loop_label = QLabel("迴圈計數器:")
+        loop_label.setFont(QFont("Consolas", 9))
+        loop_label.setStyleSheet("font-weight: bold;")
+        var_monitor_layout.addWidget(loop_label)
+        self._loop_counters_text = QTextEdit()
+        self._loop_counters_text.setReadOnly(True)
+        self._loop_counters_text.setFont(QFont("Consolas", 8))
+        self._loop_counters_text.setMaximumHeight(100)
+        self._loop_counters_text.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        var_monitor_layout.addWidget(self._loop_counters_text)
+        
+        # Node execution results
+        node_label = QLabel("節點執行結果:")
+        node_label.setFont(QFont("Consolas", 9))
+        node_label.setStyleSheet("font-weight: bold;")
+        var_monitor_layout.addWidget(node_label)
+        self._node_results_text = QTextEdit()
+        self._node_results_text.setReadOnly(True)
+        self._node_results_text.setFont(QFont("Consolas", 8))
+        self._node_results_text.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        var_monitor_layout.addWidget(self._node_results_text)
+        
+        var_monitor_dock.setWidget(var_monitor_widget)
+        self.addDockWidget(Qt.LeftDockWidgetArea, var_monitor_dock)
+        self._var_monitor_dock = var_monitor_dock
 
         toolbar = self.addToolBar("Main")
         btn_start = QPushButton("開始截圖", self)
@@ -693,6 +787,8 @@ class MainWindow(QMainWindow):
         btn_stop = QPushButton("停止執行", self)
         btn_stop.setEnabled(False)  # Disabled until script is running
         btn_reload = QPushButton("重新載入", self)
+        # TODO: 錄製模式功能尚未實作 - 規劃中功能，待後續開發
+        # 功能說明：錄製滑鼠與鍵盤操作並自動轉換為對應的節點序列
         btn_record = QPushButton("錄製模式 (即將推出)", self)
         btn_record.setCheckable(True)
         btn_record.setEnabled(False)  # Disable until implemented
@@ -700,6 +796,9 @@ class MainWindow(QMainWindow):
         btn_step = QPushButton("單步執行", self)
         btn_step.setEnabled(False)  # Enabled when script is running
         btn_step.setToolTip("逐步執行腳本，每次執行一個節點")
+        btn_continue = QPushButton("繼續執行", self)
+        btn_continue.setEnabled(False)  # Enabled when script is running
+        btn_continue.setToolTip("切換回連續執行模式")
         btn_pause = QPushButton("暫停", self)
         btn_pause.setEnabled(False)  # Enabled when script is running
         btn_pause.setCheckable(True)
@@ -719,6 +818,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(btn_record)
         toolbar.addWidget(btn_step)
+        toolbar.addWidget(btn_continue)
         toolbar.addWidget(btn_pause)
         toolbar.addSeparator()
         toolbar.addWidget(btn_undo)
@@ -734,8 +834,13 @@ class MainWindow(QMainWindow):
 
         properties.attach_editor(editor)
         properties.attach_sidebar(sidebar)
+        # Store sidebar reference before using it
+        self._sidebar = sidebar
         # Connect template changes to refresh label autocomplete
         sidebar.templatesChanged.connect(properties.refresh_label_completers)
+        # Set available templates in editor for validation
+        self._update_editor_available_templates()
+        sidebar.templatesChanged.connect(self._update_editor_available_templates)
         editor.nodeSelected.connect(properties.set_node)
         editor.nodeParamsChanged.connect(properties.set_node)  # Refresh properties when node params change
         editor.imageDropped.connect(self._handle_image_drop)  # Handle image drops on find_image nodes
@@ -745,6 +850,7 @@ class MainWindow(QMainWindow):
         btn_validate.clicked.connect(self._validate_current_script)
         btn_record.toggled.connect(self._toggle_recording_mode)
         btn_step.clicked.connect(self._step_execute)
+        btn_continue.clicked.connect(self._continue_execution)
         btn_pause.toggled.connect(self._pause_execution)
         btn_save.clicked.connect(self._save_all_scripts_dialog)
         btn_load.clicked.connect(self._load_all_scripts_dialog)
@@ -757,15 +863,15 @@ class MainWindow(QMainWindow):
         self._btn_stop = btn_stop
         self._btn_record = btn_record
         self._btn_step = btn_step
+        self._btn_continue = btn_continue
         self._btn_pause = btn_pause
         self._recording_mode = False
         self._execution_paused = False
         self._script_runner: Optional[ScriptRunnerThread] = None
         self._step_mode = False
         
-        # Store references before setting up callbacks that use them
+        # Store editor reference (sidebar already stored above)
         self._editor = editor
-        self._sidebar = sidebar
         
         # Now safe to bind callbacks that reference self._editor
         self._automation.on_node_executed = lambda nid, ok: self._editor.highlight_active_node(nid) if hasattr(self, '_editor') and self._editor else None
@@ -884,29 +990,104 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_preview_label') and self._preview_label and not self._preview_frozen:
             # Draw detection boxes on the frame
             preview_img = qimg.copy()
+            detection_boxes_info = []  # Store box info for click detection
+            
             if self._latest_vision_result and "found_targets" in self._latest_vision_result:
                 from PySide6.QtGui import QPainter, QPen, QColor
                 painter = QPainter(preview_img)
                 pen = QPen(QColor(0, 255, 0), 2)
                 painter.setPen(pen)
+                
+                # Get original image size for coordinate mapping
+                orig_w = qimg.width()
+                orig_h = qimg.height()
+                
                 for det in self._latest_vision_result["found_targets"]:
                     bbox = det.get("bbox", [])
                     if len(bbox) == 4:
                         x1, y1, x2, y2 = bbox
+                        # Draw on preview image (original coordinates)
                         painter.drawRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1))
                         # Draw label
                         label = det.get("label", "")
                         if label:
                             painter.drawText(int(x1), int(y1) - 5, label)
+                        
+                        # Store box info for click detection (will be scaled later)
+                        detection_boxes_info.append({
+                            "bbox": bbox,
+                            "label": label,
+                            "screen_coords": None  # Will be calculated after scaling
+                        })
                 painter.end()
             
             # Scale image to fit preview label
+            preview_size = self._preview_label.size()
             scaled = preview_img.scaled(
-                self._preview_label.size(),
+                preview_size,
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
+            
+            # Calculate scale factors for coordinate mapping
+            scale_x = scaled.width() / orig_w if orig_w > 0 else 1.0
+            scale_y = scaled.height() / orig_h if orig_h > 0 else 1.0
+            
+            # Calculate offset (centered scaling)
+            offset_x = (preview_size.width() - scaled.width()) / 2
+            offset_y = (preview_size.height() - scaled.height()) / 2
+            
+            # Update screen coordinates for detection boxes
+            for box_info in detection_boxes_info:
+                x1, y1, x2, y2 = box_info["bbox"]
+                # Scale and offset coordinates
+                screen_x1 = int(x1 * scale_x + offset_x)
+                screen_y1 = int(y1 * scale_y + offset_y)
+                screen_x2 = int(x2 * scale_x + offset_x)
+                screen_y2 = int(y2 * scale_y + offset_y)
+                box_info["screen_coords"] = (screen_x1, screen_y1, screen_x2, screen_y2)
+            
+            # Store detection boxes for click detection
+            self._preview_detection_boxes = detection_boxes_info
+            if hasattr(self._preview_label, 'set_detection_boxes'):
+                self._preview_label.set_detection_boxes(detection_boxes_info)
+            
             self._preview_label.setPixmap(QPixmap.fromImage(scaled))
+    
+    def _apply_label_to_selected_node(self, label: str):
+        """Apply label to currently selected node if it supports label parameter"""
+        if not self._editor:
+            return
+        
+        selected_node_id = self._editor._selected_node_id()
+        if not selected_node_id:
+            self.statusBar().showMessage("請先選中一個節點", 2000)
+            return
+        
+        node = self._editor._find_node(selected_node_id)
+        if not node:
+            return
+        
+        # Check if node type supports label parameter
+        if node.type in ["click", "condition", "find_image", "verify_image_color"]:
+            # Update node parameter
+            if node.type == "click" or node.type == "condition":
+                node.params["label"] = label
+            elif node.type in ["find_image", "verify_image_color"]:
+                node.params["template_name"] = label
+            
+            # Emit signal to update properties panel
+            if self._editor:
+                self._editor.nodeParamsChanged.emit(selected_node_id, node)
+                self._editor._emit_changed()
+            
+            # Refresh properties panel if node is selected
+            if hasattr(self, '_properties') and self._properties:
+                self._properties.set_node(selected_node_id, node)
+            
+            self.statusBar().showMessage(f"已將標籤 '{label}' 套用到節點 {selected_node_id}", 2000)
+        else:
+            self.statusBar().showMessage(f"節點類型 '{node.type}' 不支援標籤參數", 2000)
 
 
     def _run_current_script(self):
@@ -920,6 +1101,16 @@ class MainWindow(QMainWindow):
         if self._script_runner and self._script_runner.isRunning():
             self.statusBar().showMessage("腳本正在執行中，請先停止")
             return
+        
+        # Automatic validation before execution
+        issues = self._editor.validate_script()
+        if issues:
+            # Show validation dialog with option to continue or cancel
+            user_choice = self._show_validation_dialog(issues, allow_continue=True)
+            if user_choice == "cancel":
+                # User chose to cancel execution
+                return
+            # User chose to continue despite issues
         
         # Display pre-execution checklist in status bar
         self.statusBar().showMessage("檢查前置條件：請確保已啟動截圖，且所有模板圖片檔案存在且可讀取...", 2000)
@@ -957,6 +1148,7 @@ class MainWindow(QMainWindow):
             runner.finishedOK.connect(self._on_script_finished)
             runner.failed.connect(self._on_script_failed)
             runner.finished.connect(self._on_script_thread_finished)  # QThread finished signal
+            runner.performanceReportReady.connect(self._show_performance_report)
             
             # Clear previous execution states
             self._editor.clear_execution_states()
@@ -968,7 +1160,12 @@ class MainWindow(QMainWindow):
             self._btn_exec.setEnabled(False)
             self._btn_stop.setEnabled(True)
             self._btn_step.setEnabled(True)
+            self._btn_continue.setEnabled(True)
             self._btn_pause.setEnabled(True)
+            
+            # Initialize execution mode status
+            self._automation.execution_mode = "continuous"
+            self._update_execution_mode_status()
             
             runner.start()
         except Exception:
@@ -986,6 +1183,27 @@ class MainWindow(QMainWindow):
     def _on_script_finished(self):
         """Handle script completion"""
         self.statusBar().showMessage("腳本執行完成", 3000)
+        # Note: execution mode status will be cleared in _on_script_thread_finished
+    
+    def _show_performance_report(self, report: dict):
+        """Show performance report in log panel"""
+        self._append_log_message("\n" + "="*60)
+        self._append_log_message("效能報告")
+        self._append_log_message("="*60)
+        self._append_log_message(f"總執行時間: {report['total_duration']:.3f} 秒")
+        self._append_log_message(f"總節點執行次數: {report['total_nodes_executed']}")
+        self._append_log_message("\n節點執行時間詳情:")
+        for node_id, timing in sorted(report['node_timings'].items(), key=lambda x: x[1]['total_time'], reverse=True):
+            self._append_log_message(f"  {node_id} ({timing['type']}):")
+            self._append_log_message(f"    執行次數: {timing['count']}")
+            self._append_log_message(f"    總時間: {timing['total_time']:.3f} 秒")
+            self._append_log_message(f"    平均時間: {timing['avg_time']:.3f} 秒")
+            self._append_log_message(f"    最小/最大: {timing['min_time']:.3f} / {timing['max_time']:.3f} 秒")
+        self._append_log_message("\n節點類型摘要:")
+        for node_type, summary in sorted(report['node_type_summary'].items(), key=lambda x: x[1]['total_time'], reverse=True):
+            avg = summary['total_time'] / summary['count'] if summary['count'] > 0 else 0
+            self._append_log_message(f"  {node_type}: {summary['count']} 次, 總時間 {summary['total_time']:.3f} 秒, 平均 {avg:.3f} 秒")
+        self._append_log_message("="*60 + "\n")
     
     def _on_script_failed(self, msg: str):
         """Handle script failure"""
@@ -1006,6 +1224,25 @@ class MainWindow(QMainWindow):
         # Highlight the active node
         self._editor.highlight_active_node(node_id)
         
+        # Update node results history
+        if not hasattr(self, '_node_results_history'):
+            self._node_results_history = []
+        node = None
+        if self._current_script_name and self._current_script_name in self._script_cache:
+            script = self._script_cache[self._current_script_name]
+            node = next((n for n in script.nodes if n.id == node_id), None)
+        node_type = node.type if node else "unknown"
+        status = "✓" if ok else "✗"
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        result_entry = f"[{timestamp}] {status} {node_id} ({node_type})"
+        self._node_results_history.append(result_entry)
+        if len(self._node_results_history) > 50:  # Keep last 50 entries
+            self._node_results_history = self._node_results_history[-50:]
+        
+        # Update variable monitor
+        self._update_variable_monitor()
+        
         # Clear success states after a short delay (keep failed states visible)
         if ok:
             timer = QTimer(self)
@@ -1024,12 +1261,20 @@ class MainWindow(QMainWindow):
         self._btn_exec.setEnabled(True)
         self._btn_stop.setEnabled(False)
         self._btn_step.setEnabled(False)
+        self._btn_continue.setEnabled(False)
         self._btn_pause.setEnabled(False)
         self._btn_pause.setChecked(False)
         # Clear all execution states
         self._editor.clear_execution_states()
         self._script_runner = None
         self._step_mode = False
+        # Reset status bar to ready state
+        self.statusBar().showMessage("就緒")
+        # Clear variable monitor
+        if hasattr(self, '_vision_summary_text'):
+            self._vision_summary_text.setPlainText("等待執行...")
+            self._loop_counters_text.setPlainText("無活躍迴圈")
+            self._node_results_text.setPlainText("")
         # Note: AutomationController state is reset in its finally block, so we don't need to reset it here
     
     def _wait_for_first_frame(self, callback=None, **callback_kwargs):
@@ -1115,20 +1360,148 @@ class MainWindow(QMainWindow):
     def _step_execute(self):
         """Step execution - execute one node at a time"""
         if self._script_runner and self._script_runner.isRunning():
-            self._automation.execution_mode = "step"
-            self._automation.resume_execution()
-            self.statusBar().showMessage("單步執行：已執行一個節點", 1500)
+            # If not already in step mode, set it to step mode and start the first step
+            if self._automation.execution_mode != "step":
+                self._automation.execution_mode = "step"
+                self._automation.resume_execution()
+                self._update_execution_mode_status()
+                self.statusBar().showMessage("已切換為單步模式，執行一個節點", 1500)
+            else:
+                # Already in step mode, just resume to execute one more node
+                self._automation.resume_execution()
+                self.statusBar().showMessage("單步執行：執行下一個節點", 1000)
         else:
             self.statusBar().showMessage("請先開始執行腳本", 2000)
+    
+    def _continue_execution(self):
+        """Continue execution - switch back to continuous mode"""
+        if self._script_runner and self._script_runner.isRunning():
+            self._automation.execution_mode = "continuous"
+            self._automation.resume_execution()
+            self._update_execution_mode_status()
+            self.statusBar().showMessage("已切換為連續執行模式", 2000)
+        else:
+            self.statusBar().showMessage("請先開始執行腳本", 2000)
+    
+    def _update_execution_mode_status(self):
+        """Update status bar and tooltips to reflect current execution mode"""
+        mode = self._automation.execution_mode
+        if mode == "step":
+            mode_text = "單步模式"
+            self._btn_step.setToolTip("單步模式：點擊切換回連續模式")
+            self._btn_continue.setToolTip("切換回連續執行模式")
+        else:
+            mode_text = "連續模式"
+            self._btn_step.setToolTip("逐步執行腳本，每次執行一個節點")
+            self._btn_continue.setToolTip("切換回連續執行模式（目前已是連續模式）")
+        
+        # Update status bar with mode indicator (only if script is running)
+        if self._script_runner and self._script_runner.isRunning():
+            self.statusBar().showMessage(f"執行模式：{mode_text}", 0)
+    
+    def _update_variable_monitor(self):
+        """Update variable monitor with current execution state"""
+        if not hasattr(self, '_vision_summary_text'):
+            return
+        
+        # Update vision result summary
+        vision_result = self._latest_vision_result
+        found_targets = vision_result.get("found_targets", [])
+        vision_summary = f"偵測到 {len(found_targets)} 個目標:\n"
+        for det in found_targets[:10]:  # Show first 10
+            label = det.get("label", "unknown")
+            conf = det.get("confidence", 0.0)
+            bbox = det.get("bbox", [0, 0, 0, 0])
+            vision_summary += f"  - {label}: {conf:.2f} @ {bbox}\n"
+        if len(found_targets) > 10:
+            vision_summary += f"  ... 還有 {len(found_targets) - 10} 個目標\n"
+        self._vision_summary_text.setPlainText(vision_summary)
+        
+        # Update loop counters
+        loop_counters = self._automation._loop_counters
+        if loop_counters:
+            loop_text = ""
+            for node_id, count in loop_counters.items():
+                loop_text += f"節點 {node_id}: {count} 次\n"
+            self._loop_counters_text.setPlainText(loop_text)
+        else:
+            self._loop_counters_text.setPlainText("無活躍迴圈")
+        
+        # Update node execution results (keep last 20 results)
+        if not hasattr(self, '_node_results_history'):
+            self._node_results_history = []
+        
+        # Get current script and find node info
+        if self._current_script_name and self._current_script_name in self._script_cache:
+            script = self._script_cache[self._current_script_name]
+            # This will be updated by _on_node_executed with actual node info
+            # For now, just show the history
+            if self._node_results_history:
+                results_text = "\n".join(self._node_results_history[-20:])
+                self._node_results_text.setPlainText(results_text)
     
     def _pause_execution(self, checked: bool):
         """Pause/resume execution"""
         if checked:
             self._automation.pause_execution()
-            self.statusBar().showMessage("腳本已暫停", 2000)
+            mode_text = "單步模式" if self._automation.execution_mode == "step" else "連續模式"
+            self.statusBar().showMessage(f"腳本已暫停 ({mode_text})", 0)
         else:
             self._automation.resume_execution()
-            self.statusBar().showMessage("腳本已繼續", 2000)
+            mode_text = "單步模式" if self._automation.execution_mode == "step" else "連續模式"
+            self.statusBar().showMessage(f"腳本已繼續 ({mode_text})", 0)
+    
+    def _show_validation_dialog(self, issues: List[tuple[str, str]], allow_continue: bool = False) -> str:
+        """
+        Show validation dialog with issues list.
+        
+        Args:
+            issues: List of (node_id, issue_description) tuples
+            allow_continue: If True, show "仍然執行" button; if False, only show "關閉" button
+        
+        Returns:
+            "continue" if user chose to continue, "cancel" if user chose to cancel/close
+        """
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QListWidgetItem, QPushButton, QHBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("腳本驗證結果" if not allow_continue else "腳本驗證警告")
+        layout = QVBoxLayout(dlg)
+        list_widget = QListWidget()
+        for node_id, issue in issues:
+            item_text = f"{node_id}: {issue}" if node_id else issue
+            list_widget.addItem(QListWidgetItem(item_text))
+        layout.addWidget(list_widget)
+        
+        def on_item_clicked(item: QListWidgetItem):
+            # Extract node_id from item text
+            text = item.text()
+            if ":" in text:
+                node_id = text.split(":")[0].strip()
+                if node_id:
+                    # Select the node in editor
+                    self._editor.highlight_active_node(node_id)
+        
+        list_widget.itemDoubleClicked.connect(on_item_clicked)
+        
+        # Button layout
+        btn_layout = QHBoxLayout()
+        if allow_continue:
+            btn_continue = QPushButton("仍然執行")
+            btn_continue.clicked.connect(lambda: dlg.done(1))  # Return code 1 for continue
+            btn_cancel = QPushButton("取消執行")
+            btn_cancel.clicked.connect(lambda: dlg.done(0))  # Return code 0 for cancel
+            btn_layout.addWidget(btn_continue)
+            btn_layout.addWidget(btn_cancel)
+        else:
+            btn_close = QPushButton("關閉")
+            btn_close.clicked.connect(dlg.accept)
+            btn_layout.addWidget(btn_close)
+        layout.addLayout(btn_layout)
+        
+        result = dlg.exec()
+        if allow_continue:
+            return "continue" if result == 1 else "cancel"
+        return "cancel"
     
     def _validate_current_script(self):
         """Validate current script and show issues"""
@@ -1136,32 +1509,8 @@ class MainWindow(QMainWindow):
         if not issues:
             QMessageBox.information(self, "驗證結果", "腳本驗證通過，沒有發現問題。")
         else:
-            # Show dialog with issues
-            from PySide6.QtWidgets import QDialog, QVBoxLayout, QListWidget, QListWidgetItem, QPushButton
-            dlg = QDialog(self)
-            dlg.setWindowTitle("腳本驗證結果")
-            layout = QVBoxLayout(dlg)
-            list_widget = QListWidget()
-            for node_id, issue in issues:
-                item_text = f"{node_id}: {issue}" if node_id else issue
-                list_widget.addItem(QListWidgetItem(item_text))
-            layout.addWidget(list_widget)
-            
-            def on_item_clicked(item: QListWidgetItem):
-                # Extract node_id from item text
-                text = item.text()
-                if ":" in text:
-                    node_id = text.split(":")[0].strip()
-                    if node_id:
-                        # Select the node in editor
-                        self._editor.highlight_active_node(node_id)
-            
-            list_widget.itemDoubleClicked.connect(on_item_clicked)
-            
-            btn_close = QPushButton("關閉")
-            btn_close.clicked.connect(dlg.accept)
-            layout.addWidget(btn_close)
-            dlg.exec()
+            # Show dialog with issues (no continue option for manual validation)
+            self._show_validation_dialog(issues, allow_continue=False)
 
     def _on_undo(self):
         """Handle undo button click"""
@@ -1371,8 +1720,24 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
 
     def _on_templates_changed(self, mapping: dict[str, str]):
+        """
+        Handle templatesChanged signal from ResourceSidebar.
+        
+        Note: Currently no logic is implemented here, but the mapping values
+        are guaranteed to be absolute paths as per ResourceSidebar contract.
+        If future logic needs relative paths, use to_relative_path() on the
+        consumer side rather than assuming paths are relative.
+        """
         # Templates persist remains in ResourceSidebar
+        # Available templates are updated via sidebar.templatesChanged -> _update_editor_available_templates
         pass
+    
+    def _update_editor_available_templates(self):
+        """Update available templates in editor for validation"""
+        if self._editor and self._sidebar:
+            # Get template names from sidebar (keys are template names)
+            template_names = set(self._sidebar._templates.keys()) if hasattr(self._sidebar, '_templates') else set()
+            self._editor.set_available_templates(template_names)
 
     def moveEvent(self, event):
         """Update stored window geometry when window moves"""
@@ -1777,6 +2142,7 @@ class ScriptRunnerThread(QThread):
     finishedOK = Signal()
     failed = Signal(str)
     logMessage = Signal(str)  # Emit structured log messages
+    performanceReportReady = Signal(dict)  # Emit performance report when script finishes
     def __init__(self, automation: AutomationController, script: VisualScript, get_vision_result):
         super().__init__()
         self._automation = automation
@@ -1784,6 +2150,8 @@ class ScriptRunnerThread(QThread):
         self._get_vision_result = get_vision_result
         self._should_stop = False
         self._mutex = QMutex()  # Use QMutex for thread-safe flag access
+        self._node_timings: dict[str, list[float]] = {}  # node_id -> list of execution times
+        self._script_start_time: Optional[float] = None
     
     def stop(self):
         """Thread-safe method to request script execution to stop"""
@@ -1805,17 +2173,31 @@ class ScriptRunnerThread(QThread):
             def node_about_to_execute_callback(nid: str):
                 # Emit signal to MainWindow to set node to running state
                 self.nodeAboutToExecute.emit(nid)
+                # Record start time for performance tracking
+                if nid not in self._node_timings:
+                    self._node_timings[nid] = []
+                import time
+                self._node_timings[nid].append(time.time())
             
             def node_executed_callback(nid: str, ok: bool):
                 node = self._automation._find_node(self._script, nid) if hasattr(self._automation, '_find_node') else None
                 node_type = node.type if node else "unknown"
                 status = "成功" if ok else "失敗"
                 log(f"節點執行: {nid} ({node_type}) - {status}")
+                # Record end time and calculate duration
+                import time
+                if nid in self._node_timings and self._node_timings[nid]:
+                    start_time = self._node_timings[nid][-1]
+                    duration = time.time() - start_time
+                    # Store duration (negative to indicate it's a duration, not start time)
+                    self._node_timings[nid][-1] = duration
                 self.nodeExecuted.emit(nid, ok)
             
             self._automation.on_node_about_to_execute = node_about_to_execute_callback
             self._automation.on_node_executed = node_executed_callback
             log("腳本執行開始")
+            import time
+            self._script_start_time = time.time()
             
             # Pass cancellation callback to automation controller
             def should_cancel():
@@ -1831,10 +2213,43 @@ class ScriptRunnerThread(QThread):
                 should_cancel_callback=should_cancel
             )
             
+            import time
+            script_end_time = time.time()
+            total_duration = script_end_time - (self._script_start_time or script_end_time)
+            
             if self._should_stop:
                 log("腳本執行已停止（使用者取消）")
             else:
                 log("腳本執行完成")
+                # Generate performance report
+                report = {
+                    "total_duration": total_duration,
+                    "node_timings": {},
+                    "total_nodes_executed": 0,
+                    "node_type_summary": {}
+                }
+                for node_id, timings in self._node_timings.items():
+                    durations = [t for t in timings if t > 0]  # Filter out start times (negative)
+                    if durations:
+                        total_time = sum(durations)
+                        avg_time = total_time / len(durations)
+                        count = len(durations)
+                        node = self._automation._find_node(self._script, node_id) if hasattr(self._automation, '_find_node') else None
+                        node_type = node.type if node else "unknown"
+                        report["node_timings"][node_id] = {
+                            "type": node_type,
+                            "count": count,
+                            "total_time": total_time,
+                            "avg_time": avg_time,
+                            "min_time": min(durations),
+                            "max_time": max(durations)
+                        }
+                        report["total_nodes_executed"] += count
+                        if node_type not in report["node_type_summary"]:
+                            report["node_type_summary"][node_type] = {"count": 0, "total_time": 0.0}
+                        report["node_type_summary"][node_type]["count"] += count
+                        report["node_type_summary"][node_type]["total_time"] += total_time
+                self.performanceReportReady.emit(report)
                 self.finishedOK.emit()
         except ValueError as e:
             self.logMessage.emit(f"錯誤: {str(e)}")

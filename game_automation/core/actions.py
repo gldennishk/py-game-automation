@@ -4,7 +4,7 @@ from PySide6.QtCore import QPointF
 import json
 
 
-ActionType = Literal["click", "key", "sleep", "find_color", "condition", "loop", "find_image"]
+ActionType = Literal["click", "key", "sleep", "find_color", "condition", "loop", "find_image", "verify_image_color"]
 
 
 @dataclass

@@ -97,7 +97,13 @@ class ActionSequenceEditor(QWidget):
 
         combo = QComboBox()
         try:
-            combo.addItems(list(get_args(ActionType)))
+            # Filter out action types that require node control (condition, loop)
+            # and verify_image_color which is better suited for VisualScript
+            # Legacy ActionSequence is linear and doesn't support branching/looping
+            all_types = list(get_args(ActionType))
+            # Keep only types suitable for linear legacy sequences
+            legacy_types = [t for t in all_types if t in ["click", "key", "sleep", "find_color", "find_image"]]
+            combo.addItems(legacy_types)
         except Exception:
             combo.addItems(["click", "key", "sleep", "find_color"])
         idx = combo.findText(action.type)
@@ -405,6 +411,8 @@ class ResourceSidebar(QWidget):
             - templatesChanged signal emits absolute paths in its dict values
             - Conversion to relative paths happens only in persist() when saving to resources.json
             - All consumers of templatesChanged should treat the emitted paths as absolute
+            - Consumers MUST NOT pass these paths through to_absolute_path() again or assume they are relative to BASE_DIR
+            - If relative paths are needed for display or storage, use to_relative_path() on the consumer side
         """
         # Convert all paths to absolute for internal use
         # Note: mapping can contain relative or absolute paths, but _templates

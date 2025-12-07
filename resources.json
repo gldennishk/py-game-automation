@@ -1,12 +1,5 @@
 {
   "templates": {
-    "inline_image_1765088729572": "temp_templates/inline_image_1765088729572.png",
-    "inline_image_1765112802348": "temp_templates/inline_image_1765112802348.png",
-    "inline_image_1765112805975": "temp_templates/inline_image_1765112805975.png",
-    "inline_image_1765112807850": "temp_templates/inline_image_1765112807850.png",
-    "inline_image_1765112852154": "temp_templates/inline_image_1765112852154.png",
-    "123": "temp_templates/inline_image_1765112860705.png",
-    "inline_image_1765112890626": "temp_templates/inline_image_1765112890626.png",
-    "inline_image_1765112891678": "temp_templates/inline_image_1765112891678.png"
+    "123": "temp_templates/inline_image_1765112860705.png"
   }
 }

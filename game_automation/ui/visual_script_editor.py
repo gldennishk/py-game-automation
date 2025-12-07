@@ -57,6 +57,15 @@ class VisualNodeItem(QGraphicsRectItem):
         self._execution_state = self.STATE_IDLE
         self._execution_pen = None  # Will be set based on state
         
+        # Breakpoint indicator (red circle in top-left corner)
+        self._breakpoint_indicator = QGraphicsEllipseItem(0, 0, 10, 10, self)
+        self._breakpoint_indicator.setPos(5, 5)  # Position in top-left corner
+        self._breakpoint_indicator.setBrush(QBrush(QColor(244, 67, 54)))  # Red color
+        self._breakpoint_indicator.setPen(QPen(QColor(200, 50, 50), 1))
+        self._breakpoint_indicator.setZValue(10)  # Above other elements
+        self._breakpoint_enabled = False
+        self._breakpoint_indicator.setVisible(False)
+        
         # Add text items
         self._title = QGraphicsTextItem(self)
         self._title.setPlainText(f"{self._titles.get(node.type, '節點')}")
@@ -167,6 +176,17 @@ class VisualNodeItem(QGraphicsRectItem):
     def get_execution_state(self) -> str:
         """Get current execution state"""
         return self._execution_state
+    
+    def set_breakpoint_enabled(self, enabled: bool):
+        """Set breakpoint visibility"""
+        self._breakpoint_enabled = enabled
+        if hasattr(self, '_breakpoint_indicator'):
+            self._breakpoint_indicator.setVisible(enabled)
+        self.update()
+    
+    def is_breakpoint_enabled(self) -> bool:
+        """Check if breakpoint is enabled"""
+        return self._breakpoint_enabled
 
     def mousePressEvent(self, event):
         # 左鍵在右側 20px 連接區或輸出把手區域啟動拖拽連線
@@ -771,6 +791,7 @@ class VisualScriptEditor(QWidget):
         self._last_mouse_scene_pos: Optional[QPointF] = None
         self._last_node_positions: Dict[str, QPointF] = {}  # Track node positions to avoid unnecessary history pushes
         self._breakpoints: set[str] = set()  # Set of node IDs with breakpoints
+        self._available_templates: set[str] = set()  # Set of available template names for validation
         self._build_controls()
         try:
             self._scene.selectionChanged.connect(self._on_selection_changed)
@@ -985,6 +1006,9 @@ class VisualScriptEditor(QWidget):
                 self._scene.addItem(comment_item)
                 self._comment_items[n.id] = comment_item
         
+        # Sync breakpoint indicators after loading nodes
+        self._sync_breakpoint_indicators()
+        
         self._rebuild_edges_from_model()
         try:
             self._scene.blockSignals(False)
@@ -1192,18 +1216,39 @@ class VisualScriptEditor(QWidget):
         for item in self._node_items.values():
             item.set_execution_state(VisualNodeItem.STATE_IDLE)
     
+    def _sync_breakpoint_indicators(self):
+        """Sync visual breakpoint indicators with _breakpoints set"""
+        for node_id, item in self._node_items.items():
+            item.set_breakpoint_enabled(node_id in self._breakpoints)
+    
     def toggle_breakpoint(self, node_id: str):
         """Toggle breakpoint on a node"""
         if node_id in self._breakpoints:
             self._breakpoints.remove(node_id)
         else:
             self._breakpoints.add(node_id)
-        # Update visual appearance (could add breakpoint indicator)
+        
+        # Update visual breakpoint indicator
+        item = self._node_items.get(node_id)
+        if item:
+            item.set_breakpoint_enabled(node_id in self._breakpoints)
+        
+        # Update edges to reflect any changes
         self._update_all_edges()
     
     def get_breakpoints(self) -> set[str]:
         """Get set of node IDs with breakpoints"""
         return self._breakpoints.copy()
+    
+    def set_available_templates(self, template_names: set[str]):
+        """
+        Set available template names for validation.
+        This should be called by MainWindow after sidebar is initialized.
+        
+        Args:
+            template_names: Set of template names available from ResourceSidebar
+        """
+        self._available_templates = template_names.copy()
     
     def validate_script(self) -> List[tuple[str, str]]:
         """
@@ -1260,14 +1305,13 @@ class VisualScriptEditor(QWidget):
                 issues.append((node.id, "孤立節點（沒有連線）"))
         
         # Check for unknown template names in find_image and verify_image_color nodes
+        # Use injected available_templates set (set via set_available_templates())
+        available_templates = self._available_templates.copy()
         try:
             from ..core.targets import TARGET_DEFINITIONS
-            available_templates = set(TARGET_DEFINITIONS.keys())
-            if hasattr(self, '_sidebar') and self._sidebar:
-                if hasattr(self._sidebar, '_templates'):
-                    available_templates.update(self._sidebar._templates.keys())
+            available_templates.update(TARGET_DEFINITIONS.keys())
         except Exception:
-            available_templates = set()
+            pass
         
         for node in self._script.nodes:
             if node.type in ["find_image", "verify_image_color"]:
